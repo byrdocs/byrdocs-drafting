@@ -1,0 +1,71 @@
+name: Publish Shahe Campus map
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - map/ShaheCampus.svg
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-shahe-campus-map
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Inkscape
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y curl fontconfig inkscape
+          inkscape --version
+
+      - name: Install Alibaba PuHuiTi fonts
+        run: |
+          font_dir="$HOME/.local/share/fonts/alibaba-puhuiti"
+
+          mkdir -p "$font_dir"
+          for spec in \
+            "Light|https://cdn.jsdelivr.net/npm/alibabapuhuiti-3-45-light@1.0.0/AlibabaPuHuiTi-3-45-Light.ttf" \
+            "Regular|https://cdn.jsdelivr.net/npm/alibabapuhuiti-3-55-regular@1.0.0/AlibabaPuHuiTi-3-55-Regular.ttf" \
+            "Medium|https://cdn.jsdelivr.net/npm/alibabapuhuiti-3-65-medium@1.0.0/AlibabaPuHuiTi-3-65-Medium.ttf" \
+            "Bold|https://cdn.jsdelivr.net/npm/alibabapuhuiti-3-85-bold@1.0.0/AlibabaPuHuiTi-3-85-Bold.ttf"; do
+            style="${spec%%|*}"
+            url="${spec#*|}"
+            curl --fail --location --retry 3 "$url" \
+              --output "$font_dir/AlibabaPuHuiTi-3-${style}.ttf"
+          done
+
+          fc-cache -f
+          fc-match -f '%{file} | %{family} | %{style}\n' 'Alibaba PuHuiTi 3.0'
+
+      - name: Render PNG
+        run: |
+          make -C map -B ShaheCampus.png
+          test -s map/ShaheCampus.png
+
+      - name: Prepare R2 upload
+        run: |
+          mkdir -p "$RUNNER_TEMP/r2-upload"
+          cp map/ShaheCampus.png "$RUNNER_TEMP/r2-upload/ShaheCampus.png"
+
+      - name: Upload PNG to Cloudflare R2
+        uses: ryand56/r2-upload-action@latest
+        with:
+          r2-account-id: ${{ secrets.R2_ACCOUNT_ID }}
+          r2-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          r2-bucket: byrdocs-guide-attachment
+          source-dir: ${{ runner.temp }}/r2-upload
+          destination-dir: ./
+          output-file-url: false
