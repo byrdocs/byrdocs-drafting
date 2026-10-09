@@ -65,13 +65,17 @@ jobs:
           fc-cache -f
           fc-match -f '%{file} | %{family} | %{style}\n' 'Noto Sans CJK SC'
 
-      - name: Render changed measurement images
-        id: render
+      - name: Render and sync changed measurement images
         env:
           BASE_SHA: ${{ github.event.before }}
           HEAD_SHA: ${{ github.sha }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
         run: |
           set -euo pipefail
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
 
           declare -A projects=()
           render_all=false
@@ -117,69 +121,42 @@ jobs:
             mapfile -d '' -t project_dirs < <(printf '%s\0' "${!projects[@]}" | LC_ALL=C sort -zu)
           fi
 
-          mkdir -p "$RUNNER_TEMP/r2-upload"
-          delete_list="$RUNNER_TEMP/r2-delete-keys"
-          : > "$delete_list"
-
           rendered=0
-          deleted=0
+          rendered_projects=()
+          deleted_keys=()
           for project_dir in "${project_dirs[@]}"; do
             if [[ ! -f "measurement/$project_dir/main.typ" ]]; then
               object_key="measurement/$(basename "$project_dir").png"
               echo "Scheduling removal of '$object_key': main.typ no longer exists."
-              printf '%s\n' "$object_key" >> "$delete_list"
-              deleted=$((deleted + 1))
+              deleted_keys+=("$object_key")
               continue
             fi
 
             make -C measurement release DIR="$project_dir"
             output="measurement/$project_dir/main.png"
             test -s "$output"
+            rendered_projects+=("$project_dir")
+          done
 
-            # Each measurement project is a direct child of measurement/;
-            # publish its image using the project directory's name.
-            cp "$output" "$RUNNER_TEMP/r2-upload/$(basename "$project_dir").png"
+          for project_dir in "${rendered_projects[@]}"; do
+            output="measurement/$project_dir/main.png"
+            # Each project is a direct child of measurement/; publish its image
+            # using the project directory's name instead of main.png.
+            object_key="measurement/$(basename "$project_dir").png"
+            aws s3 cp "$output" "s3://byrdocs-guide-attachment/$object_key" \
+              --endpoint-url "$endpoint" \
+              --region auto \
+              --only-show-errors
             rendered=$((rendered + 1))
           done
 
-          echo "has_files=$([[ "$rendered" -gt 0 ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-          echo "has_deletions=$([[ "$deleted" -gt 0 ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-          echo "Prepared $rendered measurement image(s); scheduled $deleted removal(s)."
-
-      - name: Upload PNGs to Cloudflare R2
-        if: steps.render.outputs.has_files == 'true'
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-        run: |
-          set -euo pipefail
-          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-
-          aws s3 cp "$RUNNER_TEMP/r2-upload/" \
-            "s3://byrdocs-guide-attachment/measurement/" \
-            --recursive \
-            --endpoint-url "$endpoint" \
-            --region auto \
-            --only-show-errors
-
-      - name: Delete removed images from Cloudflare R2
-        if: steps.render.outputs.has_deletions == 'true'
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-        run: |
-          set -euo pipefail
-          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-
-          while IFS= read -r object_key; do
-            [[ -n "$object_key" ]] || continue
+          for object_key in "${deleted_keys[@]}"; do
+            echo "Deleting '$object_key' from R2."
             aws s3api delete-object \
               --bucket byrdocs-guide-attachment \
               --key "$object_key" \
               --endpoint-url "$endpoint" \
               --region auto
-          done < "$RUNNER_TEMP/r2-delete-keys"
+          done
+
+          echo "Uploaded $rendered measurement image(s); deleted ${#deleted_keys[@]} image(s)."

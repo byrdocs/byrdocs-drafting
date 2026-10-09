@@ -27,8 +27,26 @@ jobs:
       - name: Install Inkscape
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y curl fontconfig inkscape
+          sudo apt-get install --no-install-recommends -y curl fontconfig inkscape unzip
           inkscape --version
+
+      - name: Install AWS CLI
+        run: |
+          set -euo pipefail
+
+          case "$(uname -m)" in
+            x86_64) aws_arch=x86_64 ;;
+            aarch64|arm64) aws_arch=aarch64 ;;
+            *) echo "Unsupported architecture for AWS CLI: $(uname -m)" >&2; exit 1 ;;
+          esac
+
+          aws_archive="$RUNNER_TEMP/awscliv2.zip"
+          curl --fail --location --retry 3 \
+            "https://awscli.amazonaws.com/awscli-exe-linux-${aws_arch}.zip" \
+            --output "$aws_archive"
+          unzip -q "$aws_archive" -d "$RUNNER_TEMP"
+          sudo "$RUNNER_TEMP/aws/install" --update
+          aws --version
 
       - name: Install Alibaba PuHuiTi fonts
         run: |
@@ -54,18 +72,18 @@ jobs:
           make -C map -B ShaheCampus.png
           test -s map/ShaheCampus.png
 
-      - name: Prepare R2 upload
-        run: |
-          mkdir -p "$RUNNER_TEMP/r2-upload"
-          cp map/ShaheCampus.png "$RUNNER_TEMP/r2-upload/ShaheCampus.png"
-
       - name: Upload PNG to Cloudflare R2
-        uses: ryand56/r2-upload-action@latest
-        with:
-          r2-account-id: ${{ secrets.R2_ACCOUNT_ID }}
-          r2-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
-          r2-secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          r2-bucket: byrdocs-guide-attachment
-          source-dir: ${{ runner.temp }}/r2-upload
-          destination-dir: ./
-          output-file-url: false
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+
+          aws s3 cp map/ShaheCampus.png \
+            "s3://byrdocs-guide-attachment/ShaheCampus.png" \
+            --endpoint-url "$endpoint" \
+            --region auto \
+            --only-show-errors
