@@ -1,0 +1,185 @@
+name: Publish measurement images
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - measurement/Makefile
+      - measurement/lib.typ
+      - 'measurement/**/*.typ'
+      - 'measurement/**/bg.jpg'
+      - 'measurement/**/bg.png'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-measurement
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Typst and fonts
+        env:
+          TYPST_VERSION: 0.15.1
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y curl fontconfig fonts-noto-core fonts-noto-cjk unzip xz-utils
+
+          case "$(uname -m)" in
+            x86_64) aws_arch=x86_64 ;;
+            aarch64|arm64) aws_arch=aarch64 ;;
+            *) echo "Unsupported architecture for AWS CLI: $(uname -m)" >&2; exit 1 ;;
+          esac
+          aws_archive="$RUNNER_TEMP/awscliv2.zip"
+          curl --fail --location --retry 3 \
+            "https://awscli.amazonaws.com/awscli-exe-linux-${aws_arch}.zip" \
+            --output "$aws_archive"
+          unzip -q "$aws_archive" -d "$RUNNER_TEMP"
+          sudo "$RUNNER_TEMP/aws/install" --update
+          aws --version
+
+          archive="$RUNNER_TEMP/typst.tar.xz"
+          curl --fail --location --retry 3 \
+            "https://github.com/typst/typst/releases/download/v${TYPST_VERSION}/typst-x86_64-unknown-linux-musl.tar.xz" \
+            --output "$archive"
+          tar -xJf "$archive" -C "$RUNNER_TEMP"
+
+          mkdir -p "$HOME/.local/bin"
+          install "$RUNNER_TEMP/typst-x86_64-unknown-linux-musl/typst" "$HOME/.local/bin/typst"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:$PATH"
+          typst --version
+
+          fc-cache -f
+          fc-match -f '%{file} | %{family} | %{style}\n' 'Noto Sans CJK SC'
+
+      - name: Render changed measurement images
+        id: render
+        env:
+          BASE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          declare -A projects=()
+          render_all=false
+
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            render_all=true
+          elif [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]] || ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            # A new branch or unavailable base commit: render the full set.
+            render_all=true
+          else
+            while IFS= read -r -d '' changed_file; do
+              relative_path="${changed_file#measurement/}"
+
+              case "$relative_path" in
+                Makefile|lib.typ)
+                  render_all=true
+                  ;;
+                *.typ)
+                  if [[ "$relative_path" != */* ]]; then
+                    # Typst files directly under measurement/ are shared inputs.
+                    render_all=true
+                  else
+                    projects["${relative_path%%/*}"]=1
+                  fi
+                  ;;
+                */bg.jpg|*/bg.png)
+                  projects["${relative_path%%/*}"]=1
+                  ;;
+              esac
+            done < <(git diff --name-only -z "$BASE_SHA" "$HEAD_SHA" -- measurement/)
+          fi
+
+          if [[ "$render_all" == true ]]; then
+            while IFS= read -r -d '' main_file; do
+              project_dir="${main_file#measurement/}"
+              project_dir="${project_dir%/main.typ}"
+              projects["$project_dir"]=1
+            done < <(find measurement -mindepth 2 -maxdepth 2 -type f -name main.typ -print0)
+          fi
+
+          project_dirs=()
+          if ((${#projects[@]} > 0)); then
+            mapfile -d '' -t project_dirs < <(printf '%s\0' "${!projects[@]}" | LC_ALL=C sort -zu)
+          fi
+
+          mkdir -p "$RUNNER_TEMP/r2-upload"
+          delete_list="$RUNNER_TEMP/r2-delete-keys"
+          : > "$delete_list"
+
+          rendered=0
+          deleted=0
+          for project_dir in "${project_dirs[@]}"; do
+            if [[ ! -f "measurement/$project_dir/main.typ" ]]; then
+              object_key="measurement/$(basename "$project_dir").png"
+              echo "Scheduling removal of '$object_key': main.typ no longer exists."
+              printf '%s\n' "$object_key" >> "$delete_list"
+              deleted=$((deleted + 1))
+              continue
+            fi
+
+            make -C measurement release DIR="$project_dir"
+            output="measurement/$project_dir/main.png"
+            test -s "$output"
+
+            # Each measurement project is a direct child of measurement/;
+            # publish its image using the project directory's name.
+            cp "$output" "$RUNNER_TEMP/r2-upload/$(basename "$project_dir").png"
+            rendered=$((rendered + 1))
+          done
+
+          echo "has_files=$([[ "$rendered" -gt 0 ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "has_deletions=$([[ "$deleted" -gt 0 ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "Prepared $rendered measurement image(s); scheduled $deleted removal(s)."
+
+      - name: Upload PNGs to Cloudflare R2
+        if: steps.render.outputs.has_files == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+
+          aws s3 cp "$RUNNER_TEMP/r2-upload/" \
+            "s3://byrdocs-guide-attachment/measurement/" \
+            --recursive \
+            --endpoint-url "$endpoint" \
+            --region auto \
+            --only-show-errors
+
+      - name: Delete removed images from Cloudflare R2
+        if: steps.render.outputs.has_deletions == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+
+          while IFS= read -r object_key; do
+            [[ -n "$object_key" ]] || continue
+            aws s3api delete-object \
+              --bucket byrdocs-guide-attachment \
+              --key "$object_key" \
+              --endpoint-url "$endpoint" \
+              --region auto
+          done < "$RUNNER_TEMP/r2-delete-keys"
