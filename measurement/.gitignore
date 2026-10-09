@@ -1,0 +1,6 @@
+*.jpg
+*.png
+*.pdf
+*.svg
+!bg.jpg
+!bg.png
