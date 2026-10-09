@@ -46,15 +46,11 @@
 		background:move(
 			rotate(
 				rot,
-				place(
-					auto,
-					image(
-						img-path,
-						width:scale,
-						height:scale,
-					),
-					float:true,
-				)
+				image(
+					img-path,
+					width:scale,
+					height:scale,
+				),
 			),
 			dx:1pt*dx,
 			dy:1pt*dy,
@@ -81,7 +77,7 @@
 #let canvas(body)=cetz.canvas(x:1pt,y:1pt,{
 	cetz.draw.rect((0,0),(page.width.pt(),page.height.pt()))
 	cetz.draw.floating({
-		cetz.draw.content((4976,125),[单位：cm])
+		cetz.draw.content((page.width.pt()-400,125),[单位：cm])
 		body
 	})
 })
