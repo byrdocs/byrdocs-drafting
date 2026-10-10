@@ -89,12 +89,13 @@
 		dash:(25pt,20pt),
 	),
 )
-#let helping-line(a,b,fill:gray)=if sys.inputs.at("HELPING_LINE",default:"0")=="1" {
+#let helping-line(a,b,fill:gray,dash:(10pt,10pt))=if sys.inputs.at("HELPING_LINE",default:"0")=="1" {
 	cetz.draw.line(
 		a,b,
 		stroke:(
 			paint:fill,
 			thickness:5pt,
+			dash:dash,
 		),
 	)
 }
