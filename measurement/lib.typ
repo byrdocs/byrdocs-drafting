@@ -75,6 +75,20 @@
 	body
 }
 #let canvas(body)=cetz.canvas(x:1pt,y:1pt,{
+	cetz.draw.register-mark("border",style=>{
+		cetz.draw.line((-1,-4),(-1,4))
+		for y in range(-3,3) {
+			cetz.draw.line(
+				(-1,1.3*y+.1),(rel:(-1.6,.8)),
+				stroke:(
+					thickness:8pt,
+					cap:"round",
+				)
+			)
+		}
+		cetz.draw.anchor("tip",(-2.6,0))
+		cetz.draw.anchor("base",(-1,0))
+	})
 	cetz.draw.rect((0,0),(page.width.pt(),page.height.pt()))
 	cetz.draw.floating({
 		cetz.draw.content((page.width.pt()-400,125),[单位：cm])
@@ -99,10 +113,10 @@
 		),
 	)
 }
-#let anno-line(a,b,fill,rel:50%,pad:1.5,shift:false,body)={
+#let anno-line(a,b,fill,rel:50%,pad:1.5,shift:false,mark-symbol:">",body)={
 	let line-name=str(counter-line.get().first())
-	let mark-style=(
-		symbol:">",
+	let mark-style(symbol)=(
+		symbol:symbol,
 		fill:fill,
 		length:0.6cm,
 		width:0.75cm,
@@ -114,8 +128,8 @@
 			thickness:15pt,
 		),
 		mark:(
-			start:mark-style,
-			end:mark-style,
+			start:mark-style(">"),
+			end:mark-style(mark-symbol),
 		),
 		name:line-name,
 	)
@@ -131,3 +145,4 @@
 		text(fill:fill,body)
 	)
 }
+#let border-line(a,b,fill,rel:50%,pad:1.5,shift:false,body)=anno-line(a,b,fill,rel:rel,pad:pad,shift:shift,mark-symbol:"border",body)
